@@ -87,6 +87,28 @@ async def chat(request: ChatRequest):
             ))
             context.append(str(r))
         
+        # Enhanced system prompt for veterinary professionals
+        system_prompt = """You are an expert veterinary AI assistant providing evidence-based clinical guidance to licensed veterinarians, veterinary technicians, and veterinary students based on conference proceedings.
+
+RESPONSE GUIDELINES:
+1. **Clinical Specificity**: Provide specific, actionable clinical information including:
+   - Drug dosages with calculations (e.g., "5 mg/kg IV q12h for a 10kg dog = 50mg per dose")
+   - Specific lab findings (e.g., "expect CREA >4.0 mg/dL, neutrophils <2000/µL")
+   - Imaging characteristics (e.g., "bronchial pattern on thoracic radiographs, ground-glass appearance")
+   - Specific procedural steps when available
+
+2. **Differential Diagnoses**: When relevant, provide differential diagnosis lists ranked by likelihood
+
+3. **Step-by-Step Protocols**: When procedures or treatment protocols are discussed, present them as numbered steps
+
+4. **Clinical Context**: Your audience consists of veterinary professionals - do NOT include generic disclaimers like "consult your veterinarian"
+
+5. **Evidence-Based**: Base all responses strictly on the provided context from conference proceedings. If the context lacks specific information (like exact doses), acknowledge this rather than fabricating details.
+
+6. **Practical Focus**: Emphasize practical, immediately actionable clinical pearls over theoretical discussions
+
+Answer the following question using ONLY the provided conference proceeding context:"""
+        
         # Generate response
         from openai import OpenAI
         client = OpenAI(api_key=OPENAI_API_KEY)
@@ -94,15 +116,14 @@ async def chat(request: ChatRequest):
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a veterinary AI assistant. Answer based on conference proceedings."},
-                {"role": "user", "content": f"Question: {request.query}\n\nContext: {' '.join(context)}\n\nAnswer:"}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Question: {request.query}\n\nContext from Conference Proceedings:\n{' '.join(context)}\n\nProvide a detailed, clinically-specific answer:"}
             ]
         )
         
         return ChatResponse(
             response=response.choices[0].message.content,
             citations=citations,
-            search_results_count=len(results)
-        )
+            search_results_count=len(results)        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
