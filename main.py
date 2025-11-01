@@ -144,26 +144,31 @@ async def chat(request: ChatRequest):
         if len(quality_results) < 5:
             quality_results = results[:10]
         
-        # Build citations from episodes (not just facts)
-        citations = []
+        # Build context from facts
         context = []
-        seen_episodes = set()
-        
         for r in quality_results:
-            # Get the fact text
             fact_text = r.fact if hasattr(r, 'fact') else str(r)
             context.append(fact_text)
+        
+        # **FIX: Use get_episodes_by_mentions() to retrieve episode citations**
+        citations = []
+        seen_episodes = set()
+        
+        try:
+            # Extract edge objects from quality results
+            edges = [r for r in quality_results if hasattr(r, 'uuid')]
             
-            # Try to get episode information - with error handling
-            try:
-                if hasattr(r, 'episodes') and r.episodes:
-                    for episode in r.episodes:
-                        # Multiple ways episode info might be stored
-                        source_desc = None
-                        if hasattr(episode, 'source_description'):
-                            source_desc = episode.source_description
-                        elif hasattr(episode, 'name'):
-                            source_desc = episode.name
+            if edges:
+                # Get episodes that mention these edges - THIS IS THE CORRECT WAY
+                episodes = await graphiti.get_episodes_by_mentions(
+                    edges=edges,
+                    limit=min(10, len(edges))  # Get up to 10 episodes
+                )
+                
+                # Extract citations from episodes
+                for episode in episodes:
+                    if hasattr(episode, 'source_description'):
+                        source_desc = episode.source_description
                         
                         if source_desc and source_desc not in seen_episodes:
                             seen_episodes.add(source_desc)
@@ -181,13 +186,10 @@ async def chat(request: ChatRequest):
                             # Limit to 5 unique citations
                             if len(citations) >= 5:
                                 break
-                    
-                    if len(citations) >= 5:
-                        break
-            except Exception as e:
-                # Log but don't crash on citation extraction errors
-                print(f"Citation extraction error: {e}")
-                continue
+        except Exception as e:
+            # Log but don't crash on citation extraction errors
+            print(f"Citation extraction error: {e}")
+            # Continue to fallback below
         
         # Fallback: If no episode citations found, create generic ones from conferences
         if not citations:
