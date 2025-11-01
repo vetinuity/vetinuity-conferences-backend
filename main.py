@@ -154,18 +154,22 @@ async def chat(request: ChatRequest):
             fact_text = r.fact if hasattr(r, 'fact') else str(r)
             context.append(fact_text)
             
-            # Try to get episode information
-            if hasattr(r, 'episodes') and r.episodes:
-                for episode in r.episodes:
-                    if hasattr(episode, 'source_description') and episode.source_description:
-                        episode_id = episode.source_description
+            # Try to get episode information - with error handling
+            try:
+                if hasattr(r, 'episodes') and r.episodes:
+                    for episode in r.episodes:
+                        # Multiple ways episode info might be stored
+                        source_desc = None
+                        if hasattr(episode, 'source_description'):
+                            source_desc = episode.source_description
+                        elif hasattr(episode, 'name'):
+                            source_desc = episode.name
                         
-                        # Avoid duplicate citations
-                        if episode_id not in seen_episodes:
-                            seen_episodes.add(episode_id)
+                        if source_desc and source_desc not in seen_episodes:
+                            seen_episodes.add(source_desc)
                             
                             # Extract citation details
-                            citation_info = extract_citation_info(episode.source_description)
+                            citation_info = extract_citation_info(str(source_desc))
                             
                             citations.append(Citation(
                                 title=citation_info["title"],
@@ -177,30 +181,56 @@ async def chat(request: ChatRequest):
                             # Limit to 5 unique citations
                             if len(citations) >= 5:
                                 break
-                
-                if len(citations) >= 5:
-                    break
+                    
+                    if len(citations) >= 5:
+                        break
+            except Exception as e:
+                # Log but don't crash on citation extraction errors
+                print(f"Citation extraction error: {e}")
+                continue
         
-        # Fallback: If no episode citations found, create generic ones
+        # Fallback: If no episode citations found, create generic ones from conferences
         if not citations:
-            citations = [Citation(
-                title="Conference Proceeding",
-                speaker="Various Speakers",
-                conference="WVC/IVECCS",
-                year=2024
-            )]
+            # Try to infer from the query results which conferences were used
+            has_iveccs = any("IVECCS" in str(r) for r in quality_results)
+            has_wvc = any("WVC" in str(r) for r in quality_results)
+            
+            if has_iveccs:
+                citations.append(Citation(
+                    title="IVECCS 2024 Proceeding",
+                    speaker="Conference Speaker",
+                    conference="IVECCS",
+                    year=2024
+                ))
+            if has_wvc:
+                citations.append(Citation(
+                    title="WVC Proceeding",
+                    speaker="Conference Speaker", 
+                    conference="WVC",
+                    year=2025
+                ))
+            
+            # Ultimate fallback
+            if not citations:
+                citations.append(Citation(
+                    title="Conference Proceeding",
+                    speaker="Various Speakers",
+                    conference="WVC/IVECCS",
+                    year=2024
+                ))
         
-        # IMPROVED SYSTEM PROMPT: Stricter about using only context
+        # BALANCED SYSTEM PROMPT: Context-focused but practical
         system_prompt = """You are an expert veterinary AI assistant providing evidence-based clinical guidance to licensed veterinarians, veterinary technicians, and veterinary students based on conference proceedings.
 
 RESPONSE GUIDELINES:
-1. **Use the provided context**: Base your answer on the conference proceeding excerpts provided below
-2. **Be specific**: Include dosages, protocols, findings when present in context
-3. **Clinical focus**: Provide actionable clinical information
-4. **Acknowledge limitations**: If the context provides partial information, say "Based on the available proceedings..." and work with what you have
-5. **No fabrication**: Don't invent specific numbers or protocols not in the context
+1. **Prioritize the context**: Base your answer primarily on the conference proceeding excerpts provided
+2. **Be specific when possible**: Include dosages, protocols, findings when present in context
+3. **Clinical focus**: Provide actionable clinical information that practitioners can use
+4. **Work with what you have**: If context provides partial information, provide a helpful answer based on what's available
+5. **Acknowledge gaps**: If critical details are missing from the context, note this briefly but still provide useful guidance
+6. **Professional audience**: You're speaking to veterinary professionals - provide detailed clinical information without basic disclaimers
 
-Your audience consists of veterinary professionals. Provide practical, clinical guidance based on the conference proceedings context provided."""
+Synthesize the conference proceeding information below into a helpful clinical answer:"""
         
         # Generate response
         from openai import OpenAI
