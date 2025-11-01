@@ -155,44 +155,61 @@ async def chat(request: ChatRequest):
         seen_episodes = set()
         
         try:
-            # Extract edge objects from quality results
-            edges = [r for r in quality_results if hasattr(r, 'uuid')]
+            print(f"DEBUG: Attempting to get episodes for {len(quality_results)} results")
             
-            if edges:
-                # Get episodes that mention these edges - THIS IS THE CORRECT WAY
-                episodes = await graphiti.get_episodes_by_mentions(
-                    edges=edges,
-                    limit=min(10, len(edges))  # Get up to 10 episodes
-                )
-                
-                # Extract citations from episodes
-                for episode in episodes:
-                    if hasattr(episode, 'source_description'):
+            # Get episodes that mention these edges/nodes
+            episodes = await graphiti.get_episodes_by_mentions(
+                edges=quality_results,  # Pass the actual edge objects
+                limit=min(10, len(quality_results))
+            )
+            
+            print(f"DEBUG: Retrieved {len(episodes) if episodes else 0} episodes")
+            
+            if episodes:
+                for idx, episode in enumerate(episodes):
+                    print(f"DEBUG: Episode {idx} attributes: {dir(episode)}")
+                    
+                    # Try different attribute names
+                    source_desc = None
+                    if hasattr(episode, 'source_description') and episode.source_description:
                         source_desc = episode.source_description
+                    elif hasattr(episode, 'name') and episode.name:
+                        source_desc = episode.name
+                    elif hasattr(episode, 'content') and episode.content:
+                        # Sometimes the full content might have citation info
+                        source_desc = str(episode.content)[:200]  # First 200 chars
+                    
+                    print(f"DEBUG: Episode {idx} source_desc: {source_desc}")
+                    
+                    if source_desc and source_desc not in seen_episodes:
+                        seen_episodes.add(source_desc)
                         
-                        if source_desc and source_desc not in seen_episodes:
-                            seen_episodes.add(source_desc)
-                            
-                            # Extract citation details
-                            citation_info = extract_citation_info(str(source_desc))
-                            
-                            citations.append(Citation(
-                                title=citation_info["title"],
-                                speaker=citation_info["speaker"],
-                                conference=citation_info["conference"],
-                                year=citation_info["year"]
-                            ))
-                            
-                            # Limit to 5 unique citations
-                            if len(citations) >= 5:
-                                break
+                        # Extract citation details
+                        citation_info = extract_citation_info(str(source_desc))
+                        
+                        citations.append(Citation(
+                            title=citation_info["title"],
+                            speaker=citation_info["speaker"],
+                            conference=citation_info["conference"],
+                            year=citation_info["year"]
+                        ))
+                        
+                        # Limit to 5 unique citations
+                        if len(citations) >= 5:
+                            break
+            
+            print(f"DEBUG: Extracted {len(citations)} citations")
+            
         except Exception as e:
-            # Log but don't crash on citation extraction errors
-            print(f"Citation extraction error: {e}")
+            # Log detailed error information
+            print(f"Citation extraction error: {type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             # Continue to fallback below
         
         # Fallback: If no episode citations found, create generic ones from conferences
         if not citations:
+            print("DEBUG: Using fallback citations")
             # Try to infer from the query results which conferences were used
             has_iveccs = any("IVECCS" in str(r) for r in quality_results)
             has_wvc = any("WVC" in str(r) for r in quality_results)
@@ -253,4 +270,6 @@ Synthesize the conference proceeding information below into a helpful clinical a
             search_results_count=len(results)
         )
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
