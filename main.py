@@ -84,25 +84,35 @@ def extract_citation_info(source_description: str) -> dict:
     if "IVECCS" in source_description:
         conference = "IVECCS"
         year = 2024
-    elif "WVC 2025" in source_description:
+    elif "WVC) 2025" in source_description or "WVC 2025" in source_description:
         conference = "WVC"
         year = 2025
-    elif "WVC 2024" in source_description:
+    elif "WVC) 2024" in source_description or "WVC 2024" in source_description:
         conference = "WVC"
         year = 2024
-    elif "WVC 2023" in source_description:
+    elif "WVC) 2023" in source_description or "WVC 2023" in source_description:
         conference = "WVC"
         year = 2023
     
-    # Extract title (after "Conference Proceedings: ")
-    title_match = re.search(r'Conference Proceedings: ([^|]+)', source_description)
-    if title_match:
-        title = title_match.group(1).strip()
+    # Extract title - IVECCS format: "IVECCS 2024 Conference Proceedings: TITLE | Speaker:"
+    iveccs_title_match = re.search(r'IVECCS 2024 Conference Proceedings: ([^|]+)', source_description)
+    if iveccs_title_match:
+        title = iveccs_title_match.group(1).strip()
+    else:
+        # WVC format: look for quoted title in middle
+        wvc_title_match = re.search(r'"([^"]+)"', source_description)
+        if wvc_title_match:
+            title = wvc_title_match.group(1).strip()
     
-    # Extract speaker (after "Speaker: ")
-    speaker_match = re.search(r'Speaker: (.+?)(?:\||$)', source_description)
+    # Extract speaker - after "Speaker:" or look for names with credentials
+    speaker_match = re.search(r'Speaker: ([^|]+?)(?:\n|$)', source_description, re.DOTALL)
     if speaker_match:
         speaker = speaker_match.group(1).strip()
+    else:
+        # Try to find name with DVM credentials
+        name_match = re.search(r'([A-Z][a-z]+ (?:[A-Z]\. )?[A-Z][a-z]+(?:,? (?:DVM|Dr[A-Z][a-z]+|[A-Z]{3,}))+)', source_description)
+        if name_match:
+            speaker = name_match.group(1).strip()
     
     return {
         "title": title,
@@ -114,19 +124,17 @@ def extract_citation_info(source_description: str) -> dict:
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     try:
-        # IMPROVED SEARCH: Get more results to filter through
+        # Search for relevant edges
         results = await graphiti.search(request.query, num_results=30)
         
-        # FILTER FOR QUALITY: Remove generic/short facts
+        # Filter for quality
         quality_results = []
         for r in results:
             fact_text = r.fact if hasattr(r, 'fact') else str(r)
             
-            # Skip if too short (likely generic)
             if len(fact_text) < 80:
                 continue
                 
-            # Skip if doesn't mention actual medical content
             if not any(keyword in fact_text.lower() for keyword in [
                 'treatment', 'diagnosis', 'clinical', 'patient', 'disease',
                 'therapy', 'management', 'drug', 'dose', 'protocol', 'procedure',
@@ -136,81 +144,65 @@ async def chat(request: ChatRequest):
             
             quality_results.append(r)
             
-            # Stop once we have 10 quality results
             if len(quality_results) >= 10:
                 break
         
-        # If we don't have enough quality results, use what we have
         if len(quality_results) < 5:
             quality_results = results[:10]
         
-        # Build context from facts
+        # Build context
         context = []
         for r in quality_results:
             fact_text = r.fact if hasattr(r, 'fact') else str(r)
             context.append(fact_text)
         
-        # **FIX: Use get_episodes_by_mentions() to retrieve episode citations**
+        # WORKING FIX: Query Neo4j directly for citations
+        from neo4j import GraphDatabase
+        
         citations = []
-        seen_episodes = set()
+        seen_citations = set()
         
         try:
-            print(f"DEBUG: Attempting to get episodes for {len(quality_results)} results")
+            # Extract edge UUIDs
+            edge_uuids = [r.uuid for r in quality_results if hasattr(r, 'uuid')]
             
-            # Get episodes that mention these edges/nodes
-            episodes = await graphiti.get_episodes_by_mentions(
-                edges=quality_results,  # Pass the actual edge objects
-                limit=min(10, len(quality_results))
-            )
-            
-            print(f"DEBUG: Retrieved {len(episodes) if episodes else 0} episodes")
-            
-            if episodes:
-                for idx, episode in enumerate(episodes):
-                    print(f"DEBUG: Episode {idx} attributes: {dir(episode)}")
+            if edge_uuids:
+                # Direct Neo4j query to get source_description from episodes
+                driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+                
+                with driver.session() as session:
+                    # Query to find episodes that mention these edges
+                    result = session.run("""
+                        MATCH (ep:Episodic)-[:MENTIONS]->(e1:Entity)-[r:RELATES_TO]->(e2:Entity)
+                        WHERE r.uuid IN $edge_uuids
+                        RETURN DISTINCT ep.source_description as citation
+                        LIMIT 10
+                    """, edge_uuids=edge_uuids)
                     
-                    # Try different attribute names
-                    source_desc = None
-                    if hasattr(episode, 'source_description') and episode.source_description:
-                        source_desc = episode.source_description
-                    elif hasattr(episode, 'name') and episode.name:
-                        source_desc = episode.name
-                    elif hasattr(episode, 'content') and episode.content:
-                        # Sometimes the full content might have citation info
-                        source_desc = str(episode.content)[:200]  # First 200 chars
-                    
-                    print(f"DEBUG: Episode {idx} source_desc: {source_desc}")
-                    
-                    if source_desc and source_desc not in seen_episodes:
-                        seen_episodes.add(source_desc)
-                        
-                        # Extract citation details
-                        citation_info = extract_citation_info(str(source_desc))
-                        
-                        citations.append(Citation(
-                            title=citation_info["title"],
-                            speaker=citation_info["speaker"],
-                            conference=citation_info["conference"],
-                            year=citation_info["year"]
-                        ))
-                        
-                        # Limit to 5 unique citations
-                        if len(citations) >= 5:
-                            break
-            
-            print(f"DEBUG: Extracted {len(citations)} citations")
-            
+                    for record in result:
+                        citation_text = record["citation"]
+                        if citation_text and citation_text not in seen_citations:
+                            seen_citations.add(citation_text)
+                            
+                            citation_info = extract_citation_info(citation_text)
+                            
+                            citations.append(Citation(
+                                title=citation_info["title"],
+                                speaker=citation_info["speaker"],
+                                conference=citation_info["conference"],
+                                year=citation_info["year"]
+                            ))
+                            
+                            if len(citations) >= 5:
+                                break
+                
+                driver.close()
+                
         except Exception as e:
-            # Log detailed error information
-            print(f"Citation extraction error: {type(e).__name__}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            # Continue to fallback below
+            print(f"Citation extraction error: {e}")
         
-        # Fallback: If no episode citations found, create generic ones from conferences
+        # Fallback
         if not citations:
-            print("DEBUG: Using fallback citations")
-            # Try to infer from the query results which conferences were used
             has_iveccs = any("IVECCS" in str(r) for r in quality_results)
             has_wvc = any("WVC" in str(r) for r in quality_results)
             
@@ -229,7 +221,6 @@ async def chat(request: ChatRequest):
                     year=2025
                 ))
             
-            # Ultimate fallback
             if not citations:
                 citations.append(Citation(
                     title="Conference Proceeding",
@@ -238,7 +229,7 @@ async def chat(request: ChatRequest):
                     year=2024
                 ))
         
-        # BALANCED SYSTEM PROMPT: Context-focused but practical
+        # Generate response
         system_prompt = """You are an expert veterinary AI assistant providing evidence-based clinical guidance to licensed veterinarians, veterinary technicians, and veterinary students based on conference proceedings.
 
 RESPONSE GUIDELINES:
@@ -251,7 +242,6 @@ RESPONSE GUIDELINES:
 
 Synthesize the conference proceeding information below into a helpful clinical answer:"""
         
-        # Generate response
         from openai import OpenAI
         client = OpenAI(api_key=OPENAI_API_KEY)
         
@@ -261,7 +251,7 @@ Synthesize the conference proceeding information below into a helpful clinical a
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Question: {request.query}\n\nContext from Conference Proceedings:\n\n{chr(10).join(f'[{i+1}] {c}' for i, c in enumerate(context))}\n\nProvide a detailed answer based ONLY on this context:"}
             ],
-            temperature=0.3  # Lower temperature for more factual responses
+            temperature=0.3
         )
         
         return ChatResponse(
@@ -270,6 +260,4 @@ Synthesize the conference proceeding information below into a helpful clinical a
             search_results_count=len(results)
         )
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
