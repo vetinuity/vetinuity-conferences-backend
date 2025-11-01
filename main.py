@@ -37,6 +37,7 @@ class Citation(BaseModel):
     speaker: str
     conference: str
     year: int
+    source_description: str
 
 class ChatResponse(BaseModel):
     response: str
@@ -191,6 +192,7 @@ async def chat(request: ChatRequest):
                                 speaker=citation_info["speaker"],
                                 conference=citation_info["conference"],
                                 year=citation_info["year"]
+                                source_description=citation_text
                             ))
                             
                             if len(citations) >= 5:
